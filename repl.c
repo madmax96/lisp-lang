@@ -23,7 +23,7 @@ void add_history(char* c){} // not needed if on windows
 #endif
 
 //Macro for reusable error handling
-#define LVAL_ASSERT(args,cond,err) if(!(cond)) { lval_free(args); return lval_err(err); }
+#define LVAL_ASSERT(args,cond,fmt,...) if(!(cond)) { lval* err = lval_err(fmt, ##__VA_ARGS__); lval_free(args); return err; }
 
 enum LVAL_T {LVAL_NUM ,LVAL_DECIMAL_NUM,LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR, LVAL_FUNC,LVAL_ERR};
 enum EVAL_ERR {DIV_ZERO, BAD_OPERATOR, BAD_NUM};
@@ -58,6 +58,18 @@ lval* lval_pop (lval* lv, int i);
 void lval_print(lval* v);
 lval* lval_eval(lenv* env, lval* v);
 
+char* ltype_name(int t) {
+  switch(t) {
+    case LVAL_FUNC: return "Function";
+    case LVAL_NUM: return "Number";
+    case LVAL_ERR: return "Error";
+    case LVAL_SYM: return "Symbol";
+    case LVAL_SEXPR: return "S-Expression";
+    case LVAL_QEXPR: return "Q-Expression";
+    default: return "Unknown";
+  }
+}
+
 // lval type constructors
 lval* lval_num(long x){
     lval* v = malloc(sizeof(lval));
@@ -66,12 +78,22 @@ lval* lval_num(long x){
     return v;
 }
 
-lval* lval_err(char* err){
-    lval* v = malloc(sizeof(lval));
-    v->type = LVAL_ERR;
-    v->value.err = malloc(strlen(err) + 1);
-    strcpy(v->value.err, err);
-    return v;
+lval* lval_err(char* fmt, ...){
+
+
+    lval* err = malloc(sizeof(lval));
+    err->type = LVAL_ERR;
+
+    va_list arguments;
+    va_start(arguments,fmt);
+
+    err->value.err = malloc(512);
+
+    // we use va_arg(arguments,<type>) to get next argument
+    vsnprintf(err->value.err,511,fmt,arguments);
+    err->value.err = realloc(err->value.err,strlen(err->value.err) + 1);
+    va_end(arguments);
+    return err;
 }
 
 lval* lval_sym(char* sym){
@@ -147,7 +169,7 @@ void lenv_free(lenv* env){
 
 lval* lval_copy(lval* lv){
 
-  lval* copy = (lval*)malloc(sizeof(lval*));
+  lval* copy = (lval*)malloc(sizeof(lval));
   copy->type = lv->type;
 
   switch (lv->type) {
@@ -180,7 +202,7 @@ lval* env_get(lenv* env, lval* lval_sym){
       return lval_copy(env->vals[i]);
     }
   }
-  return lval_err("symbol not found in environment");
+  return lval_err("Symbol '%s' not bounded", symbol);
 }
 
 void env_put(lenv* env, lval* lval_sym, lval* value){
@@ -201,8 +223,6 @@ void env_put(lenv* env, lval* lval_sym, lval* value){
   env->vals[env->count-1] = lval_copy(value);
   env->syms[env->count-1] = malloc(strlen(symbol) + 1);
   strcpy(env->syms[env->count - 1], symbol);
-  lval_free(lval_sym);
-  lval_free(value);
 }
 
 /* Print an "lval" */
@@ -238,7 +258,7 @@ lval* lval_read_num(mpc_ast_t* ast) {
   errno = 0;
   long x = strtol(ast->contents, NULL, 10);
   return errno != ERANGE ?
-    lval_num(x) : lval_err("invalid number");
+    lval_num(x) : lval_err("Invalid number %s",ast->contents);
 }
 
 lval* lval_add(lval* x, lval* v) {
@@ -256,7 +276,7 @@ lval* reader (mpc_ast_t* ast) {
   /* If root (>) or sexpr then create empty list */
   lval* x = NULL;
   if (strcmp(ast->tag, ">") == 0 || strstr(ast->tag, "sexpr")) { x = lval_sexpr(); }
-  if(strstr(ast->tag, "qexpr")){
+  if (strstr(ast->tag, "qexpr")){
     x = lval_qexpr();
   }
    /* Fill this list with any valid expression contained within */
@@ -270,7 +290,6 @@ lval* reader (mpc_ast_t* ast) {
   }
   return x;
 }
-
 
 lval* lval_pop (lval* lv, int i) {
 
@@ -296,26 +315,27 @@ lval* eval_op(lval* lv, char* op) {
 
   // pop first arg and accumulate everything in it
   lval* first = lval_pop(lv,0);
-
+  int arg = 1;
   if (first->type != LVAL_NUM){
     lval_free(lv);
-    return lval_err("cannot operate on non numbers");
+    return lval_err("Incorect type passed to %s function for argument 0. Expected %s, got %s",op, ltype_name(LVAL_NUM),ltype_name(first->type));
   }
   if (lv->count == 0 && strcmp(op, "-") == 0) { // unary negation
     first->value.num = -first->value.num;
   }
-  while (lv->count > 0){
+  while (lv->count > 0) {
     lval* y = lval_pop(lv, 0);
-    if (y->type != LVAL_NUM){
+    if (y->type != LVAL_NUM) {
       lval_free(lv);
-      return lval_err("cannot operate on non numbers");
+        return lval_err("Incorect type passed to %s function for argument %d. Expected %s, got %s", op, arg, ltype_name(LVAL_NUM), ltype_name(y->type));
     }
+    arg++;
   // should use value.decimal_num if number is decimal
     if (strcmp(op, "+") == 0) { first->value.num += y->value.num; }
     if (strcmp(op, "-") == 0) { first->value.num -= y->value.num; }
     if (strcmp(op, "*") == 0) { first->value.num *= y->value.num;}
     if (strcmp(op, "/") == 0) {
-      if ( y->value.num == 0){
+      if (y->value.num == 0){
         lval_free(lv);
         return lval_err("ERROR: Division with 0");
       }
@@ -347,10 +367,13 @@ lval* builtin_div(lenv* env, lval* lv){
 lval* builtin_mult(lenv* env, lval* lv){
   return eval_op(lv, "*");
 }
+lval* builtin_exp(lenv* env, lval* lv){
+  return eval_op(lv, "ˆ");
+}
 lval* builtin_head(lenv* env, lval* lv){
-  LVAL_ASSERT(lv,lv->count==1, "function 'head' passed to many arguments");
-  LVAL_ASSERT(lv,lv->cell[0]->type == LVAL_QEXPR, "function 'head' passed incorect type");
-  LVAL_ASSERT(lv,lv->cell[0]->count > 0, "function 'head' passed empty q-expression");
+  LVAL_ASSERT(lv,lv->count==1, "Function 'head' passed to many arguments. Got %d, Expected %d", lv->count,1);
+  LVAL_ASSERT(lv,lv->cell[0]->type == LVAL_QEXPR, "Function 'head' passed incorect type. Expected %s, got %s", ltype_name(LVAL_QEXPR), ltype_name(lv->cell[0]->type));
+  LVAL_ASSERT(lv,lv->cell[0]->count > 0, "Function 'head' passed empty q-expression");
 
   lval* qexpr = lval_take(lv, 0);
   while (qexpr->count > 1) {
@@ -431,34 +454,37 @@ lval* builtin_len(lenv* env, lval* lv){
 
 lval* builtin_def(lenv* env, lval* lv){
 
+  // lv is already evaluated here, so we just need to assign it to symbol in env
   LVAL_ASSERT(lv,lv->count==2, "function 'def' must have 2 arguments passed");
   LVAL_ASSERT(lv,lv->cell[0]->type == LVAL_QEXPR, "function 'def' passed incorect type");
 
   lval* symbol = lv->cell[0]->cell[0];
- /* we can choose to  evaluate here, or put unevaluated value in env
-    it is probalby more performant to evaluate and then put evaluated value in env
-    because othervise evaluation will happen every time variable is accessed
-    lval* evaluated_value = lval_eval(env, lv->cell[1]);
-  */
   env_put(env, symbol, lv->cell[1]);
-  // lval_free(lv); PROBLEM HERE, we should not free params in env_put ?
+  lval_free(lv);
   return lval_sexpr();
 }
 
-void env_add_builtins(lenv* env){
-  env_put(env, lval_sym("+"), lval_func(builtin_add));
-  env_put(env, lval_sym("-"), lval_func(builtin_sub));
-  env_put(env, lval_sym("/"), lval_func(builtin_div));
-  env_put(env, lval_sym("*"), lval_func(builtin_mult));
+void add_builtin(lenv* env, lval* sym, lval* func){
+  env_put(env,sym,func);
+  lval_free(sym);
+  lval_free(func);
+}
 
-  env_put(env, lval_sym("list"), lval_func(builtin_list));
-  env_put(env, lval_sym("head"), lval_func(builtin_head));
-  env_put(env, lval_sym("tail"), lval_func(builtin_tail));
-  env_put(env, lval_sym("join"), lval_func(builtin_join));
-  env_put(env, lval_sym("eval"), lval_func(builtin_eval));
-  env_put(env, lval_sym("cons"), lval_func(builtin_cons));
-  env_put(env, lval_sym("len"), lval_func(builtin_len));
-  env_put(env, lval_sym("def"), lval_func(builtin_def));
+void env_add_builtins(lenv* env){
+  add_builtin(env, lval_sym("+"), lval_func(builtin_add));
+  add_builtin(env, lval_sym("-"), lval_func(builtin_sub));
+  add_builtin(env, lval_sym("/"), lval_func(builtin_div));
+  add_builtin(env, lval_sym("*"), lval_func(builtin_mult));
+  add_builtin(env, lval_sym("^"), lval_func(builtin_exp));
+
+  add_builtin(env, lval_sym("list"), lval_func(builtin_list));
+  add_builtin(env, lval_sym("head"), lval_func(builtin_head));
+  add_builtin(env, lval_sym("tail"), lval_func(builtin_tail));
+  add_builtin(env, lval_sym("join"), lval_func(builtin_join));
+  add_builtin(env, lval_sym("eval"), lval_func(builtin_eval));
+  add_builtin(env, lval_sym("cons"), lval_func(builtin_cons));
+  add_builtin(env, lval_sym("len"), lval_func(builtin_len));
+  add_builtin(env, lval_sym("def"), lval_func(builtin_def));
 }
 
 lval* lval_eval_sexpr(lenv* env, lval* v) {
@@ -467,6 +493,14 @@ lval* lval_eval_sexpr(lenv* env, lval* v) {
   for (int i = 0; i < v->count; i++) {
     v->cell[i] = lval_eval(env, v->cell[i]);
   }
+   printf("v-cell address: %p \n",&v->cell);
+   printf("content of v-cell: %p \n", v->cell);
+   printf("value pointed to by v-cell: %p \n", *v->cell);
+   printf("address of cell[0]: %p \n", &v->cell[0]);
+   printf("content of cell[0]: %p \n", v->cell[0]);
+   printf("address of cell[1]: %p \n", &v->cell[1]);
+   printf("content of cell[1]: %p \n", v->cell[1]);
+   printf("ses %p\n",*(v->cell+1));
 
   /* Error Checking */
   for (int i = 0; i < v->count; i++) {
@@ -520,7 +554,7 @@ int main(int argc, char** argv) {
 // /-?[0-9]+/ '.' /[0-9]+/ | /-?[0-9]+/;
   mpca_lang(MPCA_LANG_DEFAULT, "                                           \
     number   : /-?[0-9]+([.][0-9]+)?/;                                     \
-    symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&^]+/;                           \
+    symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&^]+/;                          \
     sexpr    : '(' <expr>* ')';                                            \
     qexpr    : '{' <expr>* '}';                                            \
     expr     : <number> | <symbol> | <sexpr> | <qexpr>;                    \
