@@ -25,16 +25,14 @@ void add_history(char* c){} // not needed if on windows
 //Macro for reusable error handling
 #define LVAL_ASSERT(args,cond,fmt,...) if(!(cond)) { lval* err = lval_err(fmt, ##__VA_ARGS__); lval_free(args); return err; }
 
-enum LVAL_T {LVAL_NUM ,LVAL_DECIMAL_NUM,LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR, LVAL_FUNC,LVAL_ERR};
+enum LVAL_T {LVAL_NUM ,LVAL_DECIMAL_NUM,LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR, LVAL_FUNC, LVAL_ERR};
 enum EVAL_ERR {DIV_ZERO, BAD_OPERATOR, BAD_NUM};
 
 struct lval;
 struct lenv;
 typedef struct lval lval;
 typedef struct lenv lenv;
-
 typedef lval* (*lbuiltin) (lenv*,lval*);
-
 struct lval{
   int type;
   union {
@@ -42,8 +40,13 @@ struct lval{
     double decimal_num;
     char* sym;
     char* err;
-    lbuiltin func;
+    lbuiltin builtin;
   } value;
+
+  // for user-defined functions
+  lenv* env;
+  lval* args;
+  lval* body;
   int count;
   struct lval** cell;
 };
@@ -51,13 +54,14 @@ struct lenv{
   int count;
   char** syms;
   lval** vals;
+  lenv* parent_env;
 };
 
 lval* eval (lval* lv);
 lval* lval_pop (lval* lv, int i);
 void lval_print(lval* v);
 lval* lval_eval(lenv* env, lval* v);
-
+void lenv_free(lenv* env);
 char* ltype_name(int t) {
   switch(t) {
     case LVAL_FUNC: return "Function";
@@ -79,7 +83,6 @@ lval* lval_num(long x){
 }
 
 lval* lval_err(char* fmt, ...){
-
 
     lval* err = malloc(sizeof(lval));
     err->type = LVAL_ERR;
@@ -123,7 +126,18 @@ lval* lval_qexpr(void){
 lval* lval_func(lbuiltin func) {
   lval* v = malloc(sizeof(lval));
   v->type = LVAL_FUNC;
-  v->value.func = func;
+  v->value.builtin = func;
+  return v;
+}
+
+lval* lval_lambda(lval* args,lval* body) {
+  lval* v = malloc(sizeof(lval));
+  v->type = LVAL_FUNC;
+
+  v->value.builtin = NULL;
+  v->env = lenv_new();
+  v->args = args;
+  v->body = body;
   return v;
 }
 
@@ -139,7 +153,13 @@ lenv* lenv_new(void){
 void lval_free(lval* l) {
   switch(l->type){
     case LVAL_NUM: break;
-    case LVAL_FUNC: break;
+    case LVAL_FUNC:
+      if (!l->value.builtin){
+        lval_free(l->args);
+        lval_free(l->body);
+        lenv_free(l->env);
+      }
+      break;
     case LVAL_ERR:
       free(l->value.err);
       break;
@@ -174,7 +194,16 @@ lval* lval_copy(lval* lv){
 
   switch (lv->type) {
     case LVAL_NUM: copy->value.num = lv->value.num; break;
-    case LVAL_FUNC: copy->value.func = lv->value.func; break;
+    case LVAL_FUNC:
+      if (lv->value.builtin){
+        copy->value.builtin = lv->value.builtin;
+      } else {
+        copy->value.builtin = NULL;
+        copy->env = lenv_copy(lv->env);
+        copy->args = lval_copy(lv->args);
+        copy->body = lval_copy(lv->body);
+        break;
+      }
     case LVAL_SYM:
        copy->value.sym = malloc(strlen(lv->value.sym) + 1);
        strcpy(copy->value.sym,lv->value.sym);
@@ -231,7 +260,17 @@ void lval_print(lval* v) {
     case LVAL_NUM: printf("%li ", v->value.num); break;
     case LVAL_SYM: printf("%s ", v->value.sym); break;
     case LVAL_ERR: printf("%s ", v->value.err); break;
-    case LVAL_FUNC: printf("<function>"); break;
+    case LVAL_FUNC:
+      if (v->value.builtin) {
+        printf("<function>");
+      } else  {
+        printf("lambda: ");
+        lval_print(v->args);
+        putchar(' ');
+        lval_print(v->body);
+        putchar('\n');
+      }
+      break;
     case LVAL_SEXPR:
       printf("(");
       for (int i = 0; i < v->count; i++){
@@ -464,6 +503,19 @@ lval* builtin_def(lenv* env, lval* lv){
   return lval_sexpr();
 }
 
+lval* builtin_lambda(lenv* env, lval* lv){
+
+  LVAL_ASSERT(lv,lv->count==2, "Function 'lambda' passed wrong number of arguments. Got %d, Expected %d", lv->count,2);
+  LVAL_ASSERT(lv,lv->cell[0]->type == LVAL_QEXPR, "Function 'lambda' passed incorect type for argument 0. Expected %s, got %s", ltype_name(LVAL_QEXPR), ltype_name(lv->cell[0]->type));
+  LVAL_ASSERT(lv,lv->cell[1]->type == LVAL_QEXPR, "Function 'lambda' passed incorect type for argument 1. Expected %s, got %s", ltype_name(LVAL_QEXPR), ltype_name(lv->cell[1]->type));
+
+  lval* args = lv->cell[0];
+  lval* body = lv->cell[1]->cell[0];
+  lval* lambda = lval_lambda(args,body);
+  lval_free(lv);
+  return lambda;
+}
+
 void add_builtin(lenv* env, lval* sym, lval* func){
   env_put(env,sym,func);
   lval_free(sym);
@@ -485,6 +537,7 @@ void env_add_builtins(lenv* env){
   add_builtin(env, lval_sym("cons"), lval_func(builtin_cons));
   add_builtin(env, lval_sym("len"), lval_func(builtin_len));
   add_builtin(env, lval_sym("def"), lval_func(builtin_def));
+  add_builtin(env, lval_sym("lambda"), lval_func(builtin_lambda));
 }
 
 lval* lval_eval_sexpr(lenv* env, lval* v) {
@@ -523,7 +576,7 @@ lval* lval_eval_sexpr(lenv* env, lval* v) {
   }
 
   /* Call builtin with operator */
-  lval* result = f->value.func(env, v);
+  lval* result = f->value.builtin(env, v);
   lval_free(f);
   return result;
 }
