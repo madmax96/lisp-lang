@@ -62,6 +62,9 @@ lval* lval_pop (lval* lv, int i);
 void lval_print(lval* v);
 lval* lval_eval(lenv* env, lval* v);
 void lenv_free(lenv* env);
+lenv* lenv_new(void);
+
+lenv* lenv_copy(lenv* env);
 char* ltype_name(int t) {
   switch(t) {
     case LVAL_FUNC: return "Function";
@@ -147,6 +150,7 @@ lenv* lenv_new(void){
   env->count = 0;
   env->syms = NULL;
   env->vals = NULL;
+  env->parent_env = NULL;
   return env;
 }
 
@@ -199,11 +203,11 @@ lval* lval_copy(lval* lv){
         copy->value.builtin = lv->value.builtin;
       } else {
         copy->value.builtin = NULL;
-        copy->env = lenv_copy(lv->env);
+        copy->env =  lenv_copy(lv->env);
         copy->args = lval_copy(lv->args);
         copy->body = lval_copy(lv->body);
-        break;
       }
+      break;
     case LVAL_SYM:
        copy->value.sym = malloc(strlen(lv->value.sym) + 1);
        strcpy(copy->value.sym,lv->value.sym);
@@ -223,7 +227,20 @@ lval* lval_copy(lval* lv){
   }
   return copy;
 }
+lenv* lenv_copy(lenv* env) {
+  lenv* copy = malloc(sizeof(lenv));
+  copy->parent_env = env->parent_env;
+  copy->count = env->count;
+  copy->syms = malloc(sizeof(char*) * copy->count);
+  copy->vals = malloc(sizeof(lval*) * copy->count);
 
+  for (int i = 0; i < copy->count; i++) {
+    copy->syms[i] = malloc(strlen(env->syms[i]) + 1);
+    strcpy(copy->syms[i], env->syms[i]);
+    copy->vals[i] = lval_copy(env->vals[i]);
+  }
+  return copy;
+}
 lval* env_get(lenv* env, lval* lval_sym){
   char* symbol = lval_sym->value.sym;
   for(int i = 0; i<env->count;i++){
@@ -231,7 +248,11 @@ lval* env_get(lenv* env, lval* lval_sym){
       return lval_copy(env->vals[i]);
     }
   }
-  return lval_err("Symbol '%s' not bounded", symbol);
+  if (env->parent_env){
+    return env_get(env->parent_env, lval_sym);
+  } else {
+    return lval_err("Symbol '%s' not bounded", symbol);
+  }
 }
 
 void env_put(lenv* env, lval* lval_sym, lval* value){
@@ -262,7 +283,7 @@ void lval_print(lval* v) {
     case LVAL_ERR: printf("%s ", v->value.err); break;
     case LVAL_FUNC:
       if (v->value.builtin) {
-        printf("<function>");
+        printf("builtin function");
       } else  {
         printf("lambda: ");
         lval_print(v->args);
@@ -509,8 +530,13 @@ lval* builtin_lambda(lenv* env, lval* lv){
   LVAL_ASSERT(lv,lv->cell[0]->type == LVAL_QEXPR, "Function 'lambda' passed incorect type for argument 0. Expected %s, got %s", ltype_name(LVAL_QEXPR), ltype_name(lv->cell[0]->type));
   LVAL_ASSERT(lv,lv->cell[1]->type == LVAL_QEXPR, "Function 'lambda' passed incorect type for argument 1. Expected %s, got %s", ltype_name(LVAL_QEXPR), ltype_name(lv->cell[1]->type));
 
-  lval* args = lv->cell[0];
-  lval* body = lv->cell[1]->cell[0];
+  lval* args = lval_pop(lv,0);
+  lval* body = lval_pop(lv,0);
+  // check that first q expression contains only symbols
+  for(int i = 0; i < args->count; i++) {
+    LVAL_ASSERT(lv,args->cell[i]->type == LVAL_SYM, "Function arguments must be symbols");
+  }
+
   lval* lambda = lval_lambda(args,body);
   lval_free(lv);
   return lambda;
