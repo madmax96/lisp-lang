@@ -1,0 +1,5 @@
+;(def {num} (+ 1 2))
+;;;  (print asd)
+(print num)
+(def {fn-mull} (lambda {a b} {* a b}))
+(print (fn-mull 10 20))
